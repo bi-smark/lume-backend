@@ -1,13 +1,13 @@
 const express = require('express');
 const { google } = require('googleapis');
-const admin = require('firebase-admin'); // ✅ Firebase Admin SDK
+const admin = require('firebase-admin');
+const axios = require('axios'); // ✅ Added for easier API calls
 const app = express();
 
 app.use(express.json());
 
 /**
  * ✅ FIREBASE INITIALIZATION
- * Uses the Service Account JSON stored in your Render Environment Variables
  */
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   try {
@@ -19,8 +19,6 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   } catch (error) {
     console.error("LUME LOG: Firebase Init Error:", error.message);
   }
-} else {
-  console.error("LUME LOG: FIREBASE_SERVICE_ACCOUNT environment variable is missing!");
 }
 
 const db = admin.firestore();
@@ -61,13 +59,12 @@ app.get('/auth/google/callback', async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     
-    // ✅ SAVE TO FIRESTORE: This is what makes it "Seamless"
     if (tokens.refresh_token) {
       await db.collection('settings').doc('google_auth').set({
         refresh_token: tokens.refresh_token,
         admin_email: "mutindabismark23@gmail.com",
         updated_at: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true }); // Merge ensures we don't overwrite other fields
+      }, { merge: true });
       
       console.log("✅ SUCCESS: Refresh Token saved to Firestore.");
     }
@@ -80,8 +77,53 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 3. THE STATUS CHECK (For Flutter App Startup)
- * Your Flutter app calls this to see if it should show the "Login" button or not.
+ * ✅ 3. THE PHOTO & VIDEO STREAMER (The Missing Door)
+ * This route fetches media and includes the creationTime for your date sorter.
+ */
+app.get('/photos', async (req, res) => {
+  console.log("LUME LOG: Fetching media items...");
+  
+  try {
+    // 1. Retrieve the refresh token from Firestore
+    const doc = await db.collection('settings').doc('google_auth').get();
+    if (!doc.exists) return res.status(401).json({ error: "Unauthorized" });
+
+    const refreshToken = doc.data().refresh_token;
+    oauth2Client.setCredentials({ refresh_token: refreshToken });
+
+    // 2. Get a fresh Access Token
+    const accessTokenResponse = await oauth2Client.getAccessToken();
+    const token = accessTokenResponse.token;
+
+    // 3. Call Google Photos API via REST (includes photos and videos by default)
+    const response = await axios.get('https://photoslibrary.googleapis.com/v1/mediaItems', {
+      params: { pageSize: 100 },
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+
+    const items = response.data.mediaItems || [];
+
+    // 4. Map data to include timestamp and type for Flutter
+    const formattedMedia = items.map(item => ({
+      id: item.id,
+      baseUrl: item.baseUrl,
+      mimeType: item.mimeType,
+      // creationTime is critical for your CloudSorter.groupByDate logic
+      creationTime: item.mediaMetadata.creationTime, 
+      type: item.mimeType.startsWith('video') ? 'video' : 'photo'
+    }));
+
+    console.log(`✅ SUCCESS: Streaming ${formattedMedia.length} items to LUME.`);
+    res.json(formattedMedia);
+
+  } catch (error) {
+    console.error("LUME LOG: Fetch Error:", error.response?.data || error.message);
+    res.status(500).json({ error: "Failed to stream media" });
+  }
+});
+
+/**
+ * ✅ 4. THE STATUS CHECK
  */
 app.get('/auth/status', async (req, res) => {
   try {
@@ -97,7 +139,7 @@ app.get('/auth/status', async (req, res) => {
 
 app.get('/', (req, res) => res.send("LUME Backend is Active and Running!"));
 
-const PORT = process.env.PORT || 10000; // Render uses 10000 by default
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`LUME Server active on port ${PORT}`);
 });
