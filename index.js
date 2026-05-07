@@ -1,7 +1,7 @@
 const express = require('express');
 const { google } = require('googleapis');
 const admin = require('firebase-admin');
-const axios = require('axios'); // ✅ Added for easier API calls
+const axios = require('axios');
 const app = express();
 
 app.use(express.json());
@@ -37,8 +37,8 @@ const oauth2Client = new google.auth.OAuth2(
  */
 app.get('/auth/google', (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    prompt: 'consent',
+    access_type: 'offline', // Gets the refresh token
+    prompt: 'consent',     // Forces a new refresh token
     scope: [
       'https://www.googleapis.com/auth/photoslibrary.readonly',
       'profile',
@@ -59,6 +59,7 @@ app.get('/auth/google/callback', async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     
+    // We only get the refresh_token on the first "Consent" screen
     if (tokens.refresh_token) {
       await db.collection('settings').doc('google_auth').set({
         refresh_token: tokens.refresh_token,
@@ -77,43 +78,46 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 3. THE PHOTO & VIDEO STREAMER (The Missing Door)
- * This route fetches media and includes the creationTime for your date sorter.
+ * ✅ 3. THE PHOTO & VIDEO STREAMER
+ * Fetches media and includes the creationTime for your Flutter date sorter.
  */
 app.get('/photos', async (req, res) => {
-  console.log("LUME LOG: Fetching media items...");
+  console.log("LUME LOG: Incoming request for /photos...");
   
   try {
-    // 1. Retrieve the refresh token from Firestore
     const doc = await db.collection('settings').doc('google_auth').get();
-    if (!doc.exists) return res.status(401).json({ error: "Unauthorized" });
+    if (!doc.exists) {
+      console.warn("LUME LOG: Request failed - No token in DB.");
+      return res.status(401).json({ error: "Unauthorized" });
+    }
 
     const refreshToken = doc.data().refresh_token;
     oauth2Client.setCredentials({ refresh_token: refreshToken });
 
-    // 2. Get a fresh Access Token
+    // Automatically refreshes the access token if expired
     const accessTokenResponse = await oauth2Client.getAccessToken();
     const token = accessTokenResponse.token;
 
-    // 3. Call Google Photos API via REST (includes photos and videos by default)
     const response = await axios.get('https://photoslibrary.googleapis.com/v1/mediaItems', {
       params: { pageSize: 100 },
-      headers: { 'Authorization': `Bearer ${token}` }
+      headers: { 
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
     });
 
     const items = response.data.mediaItems || [];
 
-    // 4. Map data to include timestamp and type for Flutter
+    // Format for Flutter CloudSorter.groupByDate
     const formattedMedia = items.map(item => ({
       id: item.id,
       baseUrl: item.baseUrl,
       mimeType: item.mimeType,
-      // creationTime is critical for your CloudSorter.groupByDate logic
-      creationTime: item.mediaMetadata.creationTime, 
+      creationTime: item.mediaMetadata ? item.mediaMetadata.creationTime : new Date().toISOString(), 
       type: item.mimeType.startsWith('video') ? 'video' : 'photo'
     }));
 
-    console.log(`✅ SUCCESS: Streaming ${formattedMedia.length} items to LUME.`);
+    console.log(`✅ SUCCESS: Streaming ${formattedMedia.length} items.`);
     res.json(formattedMedia);
 
   } catch (error) {
@@ -123,15 +127,26 @@ app.get('/photos', async (req, res) => {
 });
 
 /**
- * ✅ 4. THE STATUS CHECK
+ * ✅ 4. THE STATUS CHECK (App Startup)
  */
 app.get('/auth/status', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
-    if (doc.exists && doc.data().refresh_token) {
-      return res.json({ isLinked: true });
-    }
-    res.json({ isLinked: false });
+    const isLinked = doc.exists && !!doc.data().refresh_token;
+    res.json({ isLinked: isLinked });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * ✅ 5. DISCONNECT (Optional)
+ * Useful for testing or if you want to switch accounts
+ */
+app.post('/auth/disconnect', async (req, res) => {
+  try {
+    await db.collection('settings').doc('google_auth').delete();
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
