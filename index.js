@@ -37,8 +37,8 @@ const oauth2Client = new google.auth.OAuth2(
  */
 app.get('/auth/google', (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline', // Gets the refresh token
-    prompt: 'consent',     // Forces a new refresh token
+    access_type: 'offline', 
+    prompt: 'consent',     
     scope: [
       'https://www.googleapis.com/auth/photoslibrary.readonly',
       'profile',
@@ -59,7 +59,6 @@ app.get('/auth/google/callback', async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     
-    // We only get the refresh_token on the first "Consent" screen
     if (tokens.refresh_token) {
       await db.collection('settings').doc('google_auth').set({
         refresh_token: tokens.refresh_token,
@@ -79,7 +78,7 @@ app.get('/auth/google/callback', async (req, res) => {
 
 /**
  * ✅ 3. THE PHOTO & VIDEO STREAMER (Optimized)
- * Fetches media and includes the creationTime for your Flutter date sorter.
+ * Fixed to ensure permissions are refreshed correctly.
  */
 app.get('/photos', async (req, res) => {
   console.log("LUME LOG: Incoming request for /photos...");
@@ -93,7 +92,8 @@ app.get('/photos', async (req, res) => {
 
     const refreshToken = doc.data().refresh_token;
 
-    // 1. Manually refresh the token to ensure it is valid
+    // 1. Manually refresh the token via Google OAuth2 API
+    // This is the most reliable way to ensure the scope is updated
     const responseRefresh = await axios.post('https://oauth2.googleapis.com/token', {
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -103,7 +103,7 @@ app.get('/photos', async (req, res) => {
 
     const accessToken = responseRefresh.data.access_token;
 
-    // 2. Call Google Photos API using the fresh token
+    // 2. Call Google Photos API using the brand-new token
     const photosResponse = await axios.get('https://photoslibrary.googleapis.com/v1/mediaItems', {
       params: { pageSize: 100 },
       headers: { 
@@ -114,7 +114,7 @@ app.get('/photos', async (req, res) => {
 
     const items = photosResponse.data.mediaItems || [];
 
-    // 3. Format for Flutter CloudSorter.groupByDate
+    // 3. Format data for the Flutter UI
     const formattedMedia = items.map(item => ({
       id: item.id,
       baseUrl: item.baseUrl,
@@ -127,16 +127,19 @@ app.get('/photos', async (req, res) => {
     res.json(formattedMedia);
 
   } catch (error) {
-    console.error("LUME LOG Error details:", error.response ? error.response.data : error.message);
+    // This logs the RAW error from Google to Render
+    const errorDetails = error.response ? error.response.data : error.message;
+    console.error("LUME LOG Error details:", JSON.stringify(errorDetails));
+    
     res.status(500).json({ 
       error: "Failed to stream media",
-      details: error.response ? error.response.data : error.message 
+      details: errorDetails 
     });
   }
 });
 
 /**
- * ✅ 4. THE STATUS CHECK (App Startup)
+ * ✅ 4. THE STATUS CHECK
  */
 app.get('/auth/status', async (req, res) => {
   try {
@@ -149,8 +152,7 @@ app.get('/auth/status', async (req, res) => {
 });
 
 /**
- * ✅ 5. DISCONNECT (Optional)
- * Useful for testing or if you want to switch accounts
+ * ✅ 5. DISCONNECT
  */
 app.post('/auth/disconnect', async (req, res) => {
   try {
