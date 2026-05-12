@@ -78,7 +78,7 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 3. THE PHOTO & VIDEO STREAMER
+ * ✅ 3. THE PHOTO & VIDEO STREAMER (Optimized)
  * Fetches media and includes the creationTime for your Flutter date sorter.
  */
 app.get('/photos', async (req, res) => {
@@ -92,23 +92,29 @@ app.get('/photos', async (req, res) => {
     }
 
     const refreshToken = doc.data().refresh_token;
-    oauth2Client.setCredentials({ refresh_token: refreshToken });
 
-    // Automatically refreshes the access token if expired
-    const accessTokenResponse = await oauth2Client.getAccessToken();
-    const token = accessTokenResponse.token;
+    // 1. Manually refresh the token to ensure it is valid
+    const responseRefresh = await axios.post('https://oauth2.googleapis.com/token', {
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token'
+    });
 
-    const response = await axios.get('https://photoslibrary.googleapis.com/v1/mediaItems', {
+    const accessToken = responseRefresh.data.access_token;
+
+    // 2. Call Google Photos API using the fresh token
+    const photosResponse = await axios.get('https://photoslibrary.googleapis.com/v1/mediaItems', {
       params: { pageSize: 100 },
       headers: { 
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
+        'Authorization': `Bearer ${accessToken}`,
+        'Accept': 'application/json'
       }
     });
 
-    const items = response.data.mediaItems || [];
+    const items = photosResponse.data.mediaItems || [];
 
-    // Format for Flutter CloudSorter.groupByDate
+    // 3. Format for Flutter CloudSorter.groupByDate
     const formattedMedia = items.map(item => ({
       id: item.id,
       baseUrl: item.baseUrl,
@@ -121,8 +127,11 @@ app.get('/photos', async (req, res) => {
     res.json(formattedMedia);
 
   } catch (error) {
-    console.error("LUME LOG: Fetch Error:", error.response?.data || error.message);
-    res.status(500).json({ error: "Failed to stream media" });
+    console.error("LUME LOG Error details:", error.response ? error.response.data : error.message);
+    res.status(500).json({ 
+      error: "Failed to stream media",
+      details: error.response ? error.response.data : error.message 
+    });
   }
 });
 
