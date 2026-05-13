@@ -6,16 +6,13 @@ const app = express();
 
 app.use(express.json());
 
+// Firebase Initialization
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-    console.log("LUME LOG: Firebase Ready.");
-  } catch (error) {
-    console.error("LUME LOG: Firebase Init Error:", error.message);
-  }
+  } catch (e) { console.error("Firebase Error"); }
 }
-
 const db = admin.firestore();
 
 const oauth2Client = new google.auth.OAuth2(
@@ -24,16 +21,14 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_REDIRECT_URI
 );
 
-// ✅ 1. THE REDIRECTOR (Forced for 2026 Security)
+// ✅ 1. THE REDIRECTOR (Using the Picker Scope)
 app.get('/auth/google', (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
-    prompt: 'consent select_account', 
+    prompt: 'consent select_account',
     scope: [
-      'https://www.googleapis.com/auth/photoslibrary.readonly',
-      'https://www.googleapis.com/auth/userinfo.profile',
-      'https://www.googleapis.com/auth/userinfo.email',
-      'openid'
+      'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
+      'openid', 'profile', 'email'
     ],
   });
   res.redirect(authUrl);
@@ -51,19 +46,16 @@ app.get('/auth/google/callback', async (req, res) => {
       }, { merge: true });
     }
     res.redirect('lume://auth?status=success'); 
-  } catch (error) {
-    res.redirect('lume://auth?status=error');
-  }
+  } catch (e) { res.redirect('lume://auth?status=error'); }
 });
 
-// ✅ 3. THE PHOTO STREAMER
+// ✅ 3. THE THUMBNAIL STREAMER (Picker API Logic)
 app.get('/photos', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
     if (!doc.exists) return res.status(401).json({ error: "Unauthorized" });
 
     const refreshToken = doc.data().refresh_token;
-
     const refresh = await axios.post('https://oauth2.googleapis.com/token', {
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -73,26 +65,30 @@ app.get('/photos', async (req, res) => {
 
     const accessToken = refresh.data.access_token;
 
-    const response = await axios.get('https://photoslibrary.googleapis.com/v1/mediaItems', {
-      params: { pageSize: 100 },
+    // We create a session to get temporary access to thumbnails
+    const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {}, {
       headers: { 'Authorization': `Bearer ${accessToken}` }
     });
 
-    const items = response.data.mediaItems || [];
+    // We fetch the items. Note: Picker API provides 'mediaFileUri' for thumbnails
+    const photosResponse = await axios.get('https://photospicker.googleapis.com/v1/mediaItems', {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+
+    const items = photosResponse.data.mediaItems || [];
     const formatted = items.map(item => ({
       id: item.id,
-      baseUrl: item.baseUrl,
-      creationTime: item.mediaMetadata ? item.mediaMetadata.creationTime : new Date().toISOString(), 
-      type: item.mimeType.startsWith('video') ? 'video' : 'photo'
+      baseUrl: item.mediaFileUri, // This serves as the thumbnail/stream link
+      mimeType: item.mimeType,
+      creationTime: item.mediaMetadata?.creationTime || new Date().toISOString(), 
+      type: item.mimeType?.startsWith('video') ? 'video' : 'photo'
     }));
 
     res.json(formatted);
   } catch (error) {
-    res.status(500).json({ error: "Failed to stream", details: error.response?.data || error.message });
+    res.status(500).json({ error: "Stream Failed", details: error.response?.data || error.message });
   }
 });
-
-app.get('/', (req, res) => res.send("LUME Backend Active!"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`LUME active on ${PORT}`));
