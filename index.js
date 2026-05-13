@@ -15,9 +15,9 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount)
     });
-    console.log("LUME LOG: Firebase Admin Ready.");
+    console.log("LUME LOG: Firebase Ready.");
   } catch (error) {
-    console.error("LUME LOG: Firebase Init Error:", error.message);
+    console.error("LUME LOG: Firebase Error:", error.message);
   }
 }
 
@@ -30,7 +30,7 @@ const oauth2Client = new google.auth.OAuth2(
 );
 
 /**
- * ✅ 1. STATUS CHECK (Remember the User)
+ * ✅ 1. STATUS CHECK
  */
 app.get('/auth/status', async (req, res) => {
   try {
@@ -77,7 +77,7 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 4. THE PICKER SESSION (Updated for Album Selection)
+ * ✅ 4. THE PICKER SESSION (Fixed for Albums)
  */
 app.get('/picker-session', async (req, res) => {
   try {
@@ -94,13 +94,10 @@ app.get('/picker-session', async (req, res) => {
 
     const accessToken = refresh.data.access_token;
 
-    // ✅ FIX: Configure the picker to allow Album/Folder selection
+    // ✅ THE FIX: Ensuring the body strictly follows the Picker API schema
     const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {
-      albumSelectionConfig: {
-        maxSelections: 50 // Allows you to select up to 50 entire albums/folders
-      },
-      mediaItemSelectionConfig: {
-        maxSelections: 100 // Fallback for picking individual items
+      "albumSelectionConfig": {
+        "maxSelections": 50
       }
     }, {
       headers: { 
@@ -110,17 +107,18 @@ app.get('/picker-session', async (req, res) => {
     });
 
     const pickerUri = sessionRes.data.pickerUri;
-    const sessionId = sessionRes.data.id;
-
+    
     await db.collection('settings').doc('google_auth').update({
       current_picker_uri: pickerUri,
-      current_session_id: sessionId,
+      current_session_id: sessionRes.data.id,
       session_created_at: admin.firestore.FieldValue.serverTimestamp()
     });
 
     res.json({ pickerUri: pickerUri });
   } catch (error) {
-    res.status(500).json({ error: error.response?.data || error.message });
+    // Log the actual error from Google so you can see it in Render logs
+    console.error("PICKER ERROR:", error.response?.data || error.message);
+    res.status(500).json({ error: "Failed to generate picker link", details: error.response?.data || error.message });
   }
 });
 
@@ -133,7 +131,7 @@ app.get('/photos', async (req, res) => {
     const data = doc.data();
     
     if (!data || !data.current_session_id) {
-      return res.status(400).json({ error: "No active session. Run /picker-session first." });
+      return res.status(400).json({ error: "No active session." });
     }
 
     const refresh = await axios.post('https://oauth2.googleapis.com/token', {
@@ -149,20 +147,19 @@ app.get('/photos', async (req, res) => {
     });
 
     const items = response.data.mediaItems || [];
-    const formatted = items.map(item => ({
+    res.json(items.map(item => ({
       id: item.id,
       baseUrl: item.mediaFileUri,
       mimeType: item.mimeType,
+      creationTime: item.mediaMetadata?.creationTime || new Date().toISOString(),
       type: item.mimeType?.startsWith('video') ? 'video' : 'photo'
-    }));
-
-    res.json(formatted);
+    })));
   } catch (error) {
-    res.status(400).json({ error: "PENDING_USER_ACTION", details: error.response?.data || error.message });
+    res.status(400).json({ error: "PENDING_ACTION", details: error.response?.data || error.message });
   }
 });
 
-app.get('/', (req, res) => res.send("LUME Backend Active!"));
+app.get('/', (req, res) => res.send("LUME Active!"));
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`LUME active on ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
