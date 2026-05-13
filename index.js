@@ -77,7 +77,7 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 4. THE PICKER SESSION (Saves to Firebase, Sends URI to App)
+ * ✅ 4. THE PICKER SESSION (Updated for Album Selection)
  */
 app.get('/picker-session', async (req, res) => {
   try {
@@ -94,25 +94,33 @@ app.get('/picker-session', async (req, res) => {
 
     const accessToken = refresh.data.access_token;
 
-    // Generate fresh session from Google
-    const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {}, {
-      headers: { 'Authorization': `Bearer ${accessToken}` }
+    // ✅ FIX: Configure the picker to allow Album/Folder selection
+    const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {
+      albumSelectionConfig: {
+        maxSelections: 50 // Allows you to select up to 50 entire albums/folders
+      },
+      mediaItemSelectionConfig: {
+        maxSelections: 100 // Fallback for picking individual items
+      }
+    }, {
+      headers: { 
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      }
     });
 
     const pickerUri = sessionRes.data.pickerUri;
     const sessionId = sessionRes.data.id;
 
-    // SAVE TEMPORARILY TO FIREBASE
     await db.collection('settings').doc('google_auth').update({
       current_picker_uri: pickerUri,
       current_session_id: sessionId,
       session_created_at: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    // Send the URI back so Flutter can open it
     res.json({ pickerUri: pickerUri });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: error.response?.data || error.message });
   }
 });
 
@@ -150,8 +158,7 @@ app.get('/photos', async (req, res) => {
 
     res.json(formatted);
   } catch (error) {
-    // If user hasn't picked yet, this error (400) will be sent to Flutter
-    res.status(400).json({ error: "PENDING_USER_ACTION", details: "User must pick images via the URI first." });
+    res.status(400).json({ error: "PENDING_USER_ACTION", details: error.response?.data || error.message });
   }
 });
 
