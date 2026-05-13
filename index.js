@@ -34,17 +34,17 @@ const oauth2Client = new google.auth.OAuth2(
 
 /**
  * ✅ 1. THE REDIRECTOR (Start Auth)
- * Updated with modern 2026 Picker API scopes
+ * Strictly using the 2026 Picker Scopes to ensure production access.
  */
 app.get('/auth/google', (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline', // Requests a Refresh Token for permanent access
-    prompt: 'consent',     // Forces the checkbox screen to appear
+    access_type: 'offline', 
+    prompt: 'consent',     
     scope: [
-      'https://www.googleapis.com/auth/photospicker.mediaitems.readonly', // 2026 Modern Scope
-      'https://www.googleapis.com/auth/photoslibrary.readonly',         // Legacy Library Scope
-      'profile',
-      'email'
+      'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
+      'openid',
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'https://www.googleapis.com/auth/userinfo.email'
     ],
   });
   console.log("LUME LOG: Redirecting to Google Consent screen...");
@@ -79,8 +79,7 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 3. THE PHOTO & VIDEO STREAMER
- * Uses a manual axios refresh to bypass 403 caching issues.
+ * ✅ 3. THE PHOTO & VIDEO STREAMER (2026 Picker API Only)
  */
 app.get('/photos', async (req, res) => {
   console.log("LUME LOG: Incoming request for /photos...");
@@ -88,13 +87,12 @@ app.get('/photos', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
     if (!doc.exists) {
-      console.warn("LUME LOG: Request failed - No token in DB.");
       return res.status(401).json({ error: "Unauthorized" });
     }
 
     const refreshToken = doc.data().refresh_token;
 
-    // 1. Manually refresh the Access Token using the Refresh Token
+    // 1. Refresh Access Token
     const responseRefresh = await axios.post('https://oauth2.googleapis.com/token', {
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -104,9 +102,8 @@ app.get('/photos', async (req, res) => {
 
     const accessToken = responseRefresh.data.access_token;
 
-    // 2. Fetch media from Google Photos
-    const photosResponse = await axios.get('https://photoslibrary.googleapis.com/v1/mediaItems', {
-      params: { pageSize: 100 },
+    // 2. Fetch using modern Picker API Endpoint
+    const photosResponse = await axios.get('https://photospicker.googleapis.com/v1/mediaItems', {
       headers: { 
         'Authorization': `Bearer ${accessToken}`,
         'Accept': 'application/json'
@@ -115,13 +112,13 @@ app.get('/photos', async (req, res) => {
 
     const items = photosResponse.data.mediaItems || [];
 
-    // 3. Format for Flutter UI
+    // 3. Map items for Flutter UI
     const formattedMedia = items.map(item => ({
       id: item.id,
-      baseUrl: item.baseUrl,
+      baseUrl: item.mediaFileUri, // Modern endpoint uses mediaFileUri
       mimeType: item.mimeType,
       creationTime: item.mediaMetadata ? item.mediaMetadata.creationTime : new Date().toISOString(), 
-      type: item.mimeType.startsWith('video') ? 'video' : 'photo'
+      type: item.mimeType?.startsWith('video') ? 'video' : 'photo'
     }));
 
     console.log(`✅ SUCCESS: Streaming ${formattedMedia.length} items.`);
@@ -163,7 +160,7 @@ app.post('/auth/disconnect', async (req, res) => {
   }
 });
 
-app.get('/', (req, res) => res.send("LUME Backend is Active and Running!"));
+app.get('/', (req, res) => res.send("LUME Backend is Active!"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
