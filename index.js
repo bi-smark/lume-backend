@@ -30,7 +30,7 @@ const oauth2Client = new google.auth.OAuth2(
 );
 
 /**
- * ✅ 1. OAUTH REDIRECT (Step 1: Get the Refresh Token)
+ * ✅ 1. OAUTH REDIRECT
  */
 app.get('/auth/google', (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
@@ -64,13 +64,12 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 3. THE PICKER LINK GENERATOR
- * Your Flutter app calls this to get the URL where the user chooses albums/photos.
+ * ✅ 3. THE PICKER LINK GENERATOR (Manual Trigger)
  */
 app.get('/picker-session', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
-    if (!doc.exists) return res.status(401).json({ error: "Unauthorized" });
+    if (!doc.exists) return res.status(401).json({ error: "Auth doc not found. Run /auth/google first." });
 
     const refreshToken = doc.data().refresh_token;
 
@@ -83,12 +82,10 @@ app.get('/picker-session', async (req, res) => {
 
     const accessToken = refresh.data.access_token;
 
-    // Create a new Picker Session
     const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {}, {
       headers: { 'Authorization': `Bearer ${accessToken}` }
     });
 
-    // We store the current sessionId in Firestore so the /photos route knows which one to use
     await db.collection('settings').doc('google_auth').update({
       current_session_id: sessionRes.data.id
     });
@@ -98,31 +95,42 @@ app.get('/picker-session', async (req, res) => {
       sessionId: sessionRes.data.id 
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: error.response?.data || error.message });
   }
 });
 
 /**
- * ✅ 4. THE PHOTO STREAMER
- * This fetches whatever was "picked" in the current session.
+ * ✅ 4. THE PHOTO STREAMER (With Auto-Session Recovery)
  */
 app.get('/photos', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
-    const data = doc.data();
-    if (!data || !data.current_session_id) return res.status(400).json({ error: "No active session. Run /picker-session first." });
+    if (!doc.exists) return res.status(401).json({ error: "Unauthorized" });
 
+    let data = doc.data();
+    let sessionId = data.current_session_id;
+
+    // Refresh Token
     const refresh = await axios.post('https://oauth2.googleapis.com/token', {
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
       refresh_token: data.refresh_token,
       grant_type: 'refresh_token'
     });
-
     const accessToken = refresh.data.access_token;
 
+    // IF SESSION IS MISSING, CREATE ONE ON THE FLY
+    if (!sessionId) {
+      const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {}, {
+        headers: { 'Authorization': `Bearer ${accessToken}` }
+      });
+      sessionId = sessionRes.data.id;
+      await db.collection('settings').doc('google_auth').update({ current_session_id: sessionId });
+    }
+
+    // Fetch Items
     const photosResponse = await axios.get('https://photospicker.googleapis.com/v1/mediaItems', {
-      params: { sessionId: data.current_session_id },
+      params: { sessionId: sessionId },
       headers: { 'Authorization': `Bearer ${accessToken}` }
     });
 
@@ -137,6 +145,10 @@ app.get('/photos', async (req, res) => {
 
     res.json(formatted);
   } catch (error) {
+    // If the session expired, clear it in DB so the next hit creates a new one
+    if (error.response?.status === 400) {
+      await db.collection('settings').doc('google_auth').update({ current_session_id: null });
+    }
     res.status(500).json({ error: "Stream Failed", details: error.response?.data || error.message });
   }
 });
