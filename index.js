@@ -15,9 +15,9 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount)
     });
-    console.log("LUME LOG: Firebase Admin initialized.");
+    console.log("LUME LOG: Firebase Admin Ready.");
   } catch (error) {
-    console.error("LUME LOG: Firebase Error:", error.message);
+    console.error("LUME LOG: Firebase Init Error:", error.message);
   }
 }
 
@@ -30,17 +30,15 @@ const oauth2Client = new google.auth.OAuth2(
 );
 
 /**
- * ✅ 1. OAUTH STATUS CHECK (The "Memory" Logic)
- * Flutter calls this on app startup to see if it should show the login button.
+ * ✅ 1. STATUS CHECK (Remember the User)
  */
 app.get('/auth/status', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
-    // If the doc exists and has a refresh token, the user is "Remembered"
     const isLinked = doc.exists && !!doc.data().refresh_token;
     res.json({ isLinked: isLinked });
   } catch (error) {
-    res.status(500).json({ isLinked: false, error: error.message });
+    res.status(500).json({ isLinked: false });
   }
 });
 
@@ -50,7 +48,7 @@ app.get('/auth/status', async (req, res) => {
 app.get('/auth/google', (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
-    prompt: 'consent', // Ensures we always get a refresh_token during setup
+    prompt: 'consent',
     scope: [
       'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
       'openid', 'profile', 'email'
@@ -60,7 +58,7 @@ app.get('/auth/google', (req, res) => {
 });
 
 /**
- * ✅ 3. OAUTH CALLBACK
+ * ✅ 3. CALLBACK
  */
 app.get('/auth/google/callback', async (req, res) => {
   const { code } = req.query;
@@ -79,12 +77,12 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 4. THE PICKER LINK GENERATOR
+ * ✅ 4. THE PICKER SESSION (Saves to Firebase, Sends URI to App)
  */
 app.get('/picker-session', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
-    if (!doc.exists) return res.status(401).json({ error: "Auth doc not found." });
+    if (!doc.exists) return res.status(401).json({ error: "Unauthorized" });
 
     const refreshToken = doc.data().refresh_token;
     const refresh = await axios.post('https://oauth2.googleapis.com/token', {
@@ -95,90 +93,69 @@ app.get('/picker-session', async (req, res) => {
     });
 
     const accessToken = refresh.data.access_token;
+
+    // Generate fresh session from Google
     const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {}, {
       headers: { 'Authorization': `Bearer ${accessToken}` }
     });
 
+    const pickerUri = sessionRes.data.pickerUri;
+    const sessionId = sessionRes.data.id;
+
+    // SAVE TEMPORARILY TO FIREBASE
     await db.collection('settings').doc('google_auth').update({
-      current_session_id: sessionRes.data.id
+      current_picker_uri: pickerUri,
+      current_session_id: sessionId,
+      session_created_at: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    res.json({ 
-      pickerUri: sessionRes.data.pickerUri, 
-      sessionId: sessionRes.data.id 
-    });
+    // Send the URI back so Flutter can open it
+    res.json({ pickerUri: pickerUri });
   } catch (error) {
-    res.status(500).json({ error: error.response?.data || error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
 /**
- * ✅ 5. THE PHOTO STREAMER (With Auto-Session Recovery)
+ * ✅ 5. THE PHOTO STREAMER
  */
 app.get('/photos', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
-    if (!doc.exists) return res.status(401).json({ error: "Unauthorized" });
+    const data = doc.data();
+    
+    if (!data || !data.current_session_id) {
+      return res.status(400).json({ error: "No active session. Run /picker-session first." });
+    }
 
-    let data = doc.data();
-    let sessionId = data.current_session_id;
-
-    // Refresh the Access Token
     const refresh = await axios.post('https://oauth2.googleapis.com/token', {
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
       refresh_token: data.refresh_token,
       grant_type: 'refresh_token'
     });
-    const accessToken = refresh.data.access_token;
 
-    // Auto-create session if missing from DB
-    if (!sessionId) {
-      const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {}, {
-        headers: { 'Authorization': `Bearer ${accessToken}` }
-      });
-      sessionId = sessionRes.data.id;
-      await db.collection('settings').doc('google_auth').update({ current_session_id: sessionId });
-    }
-
-    // Fetch the Items
-    const photosResponse = await axios.get('https://photospicker.googleapis.com/v1/mediaItems', {
-      params: { sessionId: sessionId },
-      headers: { 'Authorization': `Bearer ${accessToken}` }
+    const response = await axios.get('https://photospicker.googleapis.com/v1/mediaItems', {
+      params: { sessionId: data.current_session_id },
+      headers: { 'Authorization': `Bearer ${refresh.data.access_token}` }
     });
 
-    const items = photosResponse.data.mediaItems || [];
+    const items = response.data.mediaItems || [];
     const formatted = items.map(item => ({
       id: item.id,
       baseUrl: item.mediaFileUri,
       mimeType: item.mimeType,
-      creationTime: item.mediaMetadata?.creationTime || new Date().toISOString(),
       type: item.mimeType?.startsWith('video') ? 'video' : 'photo'
     }));
 
     res.json(formatted);
   } catch (error) {
-    // If the session expired (400), reset it so the next refresh creates a new one
-    if (error.response?.status === 400) {
-      await db.collection('settings').doc('google_auth').update({ current_session_id: null });
-    }
-    res.status(500).json({ error: "Stream Failed", details: error.response?.data || error.message });
+    // If user hasn't picked yet, this error (400) will be sent to Flutter
+    res.status(400).json({ error: "PENDING_USER_ACTION", details: "User must pick images via the URI first." });
   }
 });
 
-/**
- * ✅ 6. DISCONNECT (Wipe Memory)
- */
-app.post('/auth/disconnect', async (req, res) => {
-  try {
-    await db.collection('settings').doc('google_auth').delete();
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/', (req, res) => res.send("LUME Picker Backend Active!"));
+app.get('/', (req, res) => res.send("LUME Backend Active!"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`LUME active on ${PORT}`));
