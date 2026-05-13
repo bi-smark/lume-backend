@@ -34,13 +34,15 @@ const oauth2Client = new google.auth.OAuth2(
 
 /**
  * ✅ 1. THE REDIRECTOR (Start Auth)
+ * Updated with modern 2026 Picker API scopes
  */
 app.get('/auth/google', (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline', 
-    prompt: 'consent',     
+    access_type: 'offline', // Requests a Refresh Token for permanent access
+    prompt: 'consent',     // Forces the checkbox screen to appear
     scope: [
-      'https://www.googleapis.com/auth/photoslibrary.readonly',
+      'https://www.googleapis.com/auth/photospicker.mediaitems.readonly', // 2026 Modern Scope
+      'https://www.googleapis.com/auth/photoslibrary.readonly',         // Legacy Library Scope
       'profile',
       'email'
     ],
@@ -77,8 +79,8 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 3. THE PHOTO & VIDEO STREAMER (Optimized)
- * Fixed to ensure permissions are refreshed correctly.
+ * ✅ 3. THE PHOTO & VIDEO STREAMER
+ * Uses a manual axios refresh to bypass 403 caching issues.
  */
 app.get('/photos', async (req, res) => {
   console.log("LUME LOG: Incoming request for /photos...");
@@ -92,8 +94,7 @@ app.get('/photos', async (req, res) => {
 
     const refreshToken = doc.data().refresh_token;
 
-    // 1. Manually refresh the token via Google OAuth2 API
-    // This is the most reliable way to ensure the scope is updated
+    // 1. Manually refresh the Access Token using the Refresh Token
     const responseRefresh = await axios.post('https://oauth2.googleapis.com/token', {
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -103,7 +104,7 @@ app.get('/photos', async (req, res) => {
 
     const accessToken = responseRefresh.data.access_token;
 
-    // 2. Call Google Photos API using the brand-new token
+    // 2. Fetch media from Google Photos
     const photosResponse = await axios.get('https://photoslibrary.googleapis.com/v1/mediaItems', {
       params: { pageSize: 100 },
       headers: { 
@@ -114,7 +115,7 @@ app.get('/photos', async (req, res) => {
 
     const items = photosResponse.data.mediaItems || [];
 
-    // 3. Format data for the Flutter UI
+    // 3. Format for Flutter UI
     const formattedMedia = items.map(item => ({
       id: item.id,
       baseUrl: item.baseUrl,
@@ -127,13 +128,12 @@ app.get('/photos', async (req, res) => {
     res.json(formattedMedia);
 
   } catch (error) {
-    // This logs the RAW error from Google to Render
-    const errorDetails = error.response ? error.response.data : error.message;
-    console.error("LUME LOG Error details:", JSON.stringify(errorDetails));
+    const errorData = error.response ? error.response.data : error.message;
+    console.error("LUME LOG Error details:", JSON.stringify(errorData));
     
     res.status(500).json({ 
       error: "Failed to stream media",
-      details: errorDetails 
+      details: errorData 
     });
   }
 });
