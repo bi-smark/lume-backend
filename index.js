@@ -30,12 +30,27 @@ const oauth2Client = new google.auth.OAuth2(
 );
 
 /**
- * ✅ 1. OAUTH REDIRECT
+ * ✅ 1. OAUTH STATUS CHECK (The "Memory" Logic)
+ * Flutter calls this on app startup to see if it should show the login button.
+ */
+app.get('/auth/status', async (req, res) => {
+  try {
+    const doc = await db.collection('settings').doc('google_auth').get();
+    // If the doc exists and has a refresh token, the user is "Remembered"
+    const isLinked = doc.exists && !!doc.data().refresh_token;
+    res.json({ isLinked: isLinked });
+  } catch (error) {
+    res.status(500).json({ isLinked: false, error: error.message });
+  }
+});
+
+/**
+ * ✅ 2. OAUTH REDIRECT
  */
 app.get('/auth/google', (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
-    prompt: 'consent',
+    prompt: 'consent', // Ensures we always get a refresh_token during setup
     scope: [
       'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
       'openid', 'profile', 'email'
@@ -45,7 +60,7 @@ app.get('/auth/google', (req, res) => {
 });
 
 /**
- * ✅ 2. OAUTH CALLBACK
+ * ✅ 3. OAUTH CALLBACK
  */
 app.get('/auth/google/callback', async (req, res) => {
   const { code } = req.query;
@@ -64,15 +79,14 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 3. THE PICKER LINK GENERATOR (Manual Trigger)
+ * ✅ 4. THE PICKER LINK GENERATOR
  */
 app.get('/picker-session', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
-    if (!doc.exists) return res.status(401).json({ error: "Auth doc not found. Run /auth/google first." });
+    if (!doc.exists) return res.status(401).json({ error: "Auth doc not found." });
 
     const refreshToken = doc.data().refresh_token;
-
     const refresh = await axios.post('https://oauth2.googleapis.com/token', {
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -81,7 +95,6 @@ app.get('/picker-session', async (req, res) => {
     });
 
     const accessToken = refresh.data.access_token;
-
     const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {}, {
       headers: { 'Authorization': `Bearer ${accessToken}` }
     });
@@ -100,7 +113,7 @@ app.get('/picker-session', async (req, res) => {
 });
 
 /**
- * ✅ 4. THE PHOTO STREAMER (With Auto-Session Recovery)
+ * ✅ 5. THE PHOTO STREAMER (With Auto-Session Recovery)
  */
 app.get('/photos', async (req, res) => {
   try {
@@ -110,7 +123,7 @@ app.get('/photos', async (req, res) => {
     let data = doc.data();
     let sessionId = data.current_session_id;
 
-    // Refresh Token
+    // Refresh the Access Token
     const refresh = await axios.post('https://oauth2.googleapis.com/token', {
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
@@ -119,7 +132,7 @@ app.get('/photos', async (req, res) => {
     });
     const accessToken = refresh.data.access_token;
 
-    // IF SESSION IS MISSING, CREATE ONE ON THE FLY
+    // Auto-create session if missing from DB
     if (!sessionId) {
       const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {}, {
         headers: { 'Authorization': `Bearer ${accessToken}` }
@@ -128,7 +141,7 @@ app.get('/photos', async (req, res) => {
       await db.collection('settings').doc('google_auth').update({ current_session_id: sessionId });
     }
 
-    // Fetch Items
+    // Fetch the Items
     const photosResponse = await axios.get('https://photospicker.googleapis.com/v1/mediaItems', {
       params: { sessionId: sessionId },
       headers: { 'Authorization': `Bearer ${accessToken}` }
@@ -145,11 +158,23 @@ app.get('/photos', async (req, res) => {
 
     res.json(formatted);
   } catch (error) {
-    // If the session expired, clear it in DB so the next hit creates a new one
+    // If the session expired (400), reset it so the next refresh creates a new one
     if (error.response?.status === 400) {
       await db.collection('settings').doc('google_auth').update({ current_session_id: null });
     }
     res.status(500).json({ error: "Stream Failed", details: error.response?.data || error.message });
+  }
+});
+
+/**
+ * ✅ 6. DISCONNECT (Wipe Memory)
+ */
+app.post('/auth/disconnect', async (req, res) => {
+  try {
+    await db.collection('settings').doc('google_auth').delete();
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
