@@ -31,25 +31,29 @@ const oauth2Client = new google.auth.OAuth2(
 
 /**
  * ✅ 1. STATUS CHECK
- * Checks if a valid refresh token exists in the database.
+ * Checks if the user actually has a valid refresh token stored.
  */
 app.get('/auth/status', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
-    const isLinked = doc.exists && !!doc.data().refresh_token;
+    if (!doc.exists) return res.json({ isLinked: false });
+    
+    const data = doc.data();
+    const isLinked = !!data.refresh_token;
     res.json({ isLinked: isLinked });
   } catch (error) {
-    res.status(500).json({ isLinked: false });
+    res.status(500).json({ isLinked: false, error: error.message });
   }
 });
 
 /**
- * ✅ 2. OAUTH REDIRECT
+ * ✅ 2. OAUTH REDIRECT (Forces the Consent Screen)
  */
 app.get('/auth/google', (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
-    prompt: 'consent',
+    // 'consent' forces Google to re-display the screen and provide a new refresh_token
+    prompt: 'consent', 
     scope: [
       'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
       'openid', 'profile', 'email'
@@ -65,25 +69,36 @@ app.get('/auth/google/callback', async (req, res) => {
   const { code } = req.query;
   try {
     const { tokens } = await oauth2Client.getToken(code);
-    if (tokens.refresh_token) {
-      await db.collection('settings').doc('google_auth').set({
-        refresh_token: tokens.refresh_token,
-        updated_at: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
+    
+    if (!tokens.refresh_token) {
+      console.log("LUME LOG: No new refresh token provided. Using existing one.");
     }
+
+    const payload = {
+      updated_at: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    if (tokens.refresh_token) {
+      payload.refresh_token = tokens.refresh_token;
+    }
+
+    await db.collection('settings').doc('google_auth').set(payload, { merge: true });
     res.redirect('lume://auth?status=success');
   } catch (error) {
+    console.error("CALLBACK ERROR:", error.message);
     res.redirect('lume://auth?status=error');
   }
 });
 
 /**
- * ✅ 4. THE PICKER SESSION (Configured Exclusively for Album Selection)
+ * ✅ 4. THE PICKER SESSION (Clean Session Creation)
  */
 app.get('/picker-session', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
-    if (!doc.exists) return res.status(401).json({ error: "Unauthorized" });
+    if (!doc.exists || !doc.data().refresh_token) {
+      return res.status(401).json({ error: "NOT_AUTHENTICATED", details: "Please run /auth/google first." });
+    }
 
     const refreshToken = doc.data().refresh_token;
     const refresh = await axios.post('https://oauth2.googleapis.com/token', {
@@ -95,10 +110,10 @@ app.get('/picker-session', async (req, res) => {
 
     const accessToken = refresh.data.access_token;
 
-    // Strict 2026 Photos Picker Schema payload configuration
+    // Strict structure configuration for Album Picker Sessions
     const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {
-      "albumSelectionConfig": {
-        "maxSelections": 50
+      albumSelectionConfig: {
+        maxSelections: 50
       }
     }, {
       headers: { 
@@ -128,10 +143,11 @@ app.get('/picker-session', async (req, res) => {
 app.get('/photos', async (req, res) => {
   try {
     const doc = await db.collection('settings').doc('google_auth').get();
+    if (!doc.exists) return res.status(401).json({ error: "Unauthorized" });
+
     const data = doc.data();
-    
-    if (!data || !data.current_session_id) {
-      return res.status(400).json({ error: "No active session." });
+    if (!data.current_session_id) {
+      return res.status(400).json({ error: "NO_ACTIVE_SESSION", message: "Run /picker-session first." });
     }
 
     const refresh = await axios.post('https://oauth2.googleapis.com/token', {
@@ -141,9 +157,12 @@ app.get('/photos', async (req, res) => {
       grant_type: 'refresh_token'
     });
 
+    const accessToken = refresh.data.access_token;
+
+    // Fetch the media items linked to the user's choices
     const response = await axios.get('https://photospicker.googleapis.com/v1/mediaItems', {
       params: { sessionId: data.current_session_id },
-      headers: { 'Authorization': `Bearer ${refresh.data.access_token}` }
+      headers: { 'Authorization': `Bearer ${accessToken}` }
     });
 
     const items = response.data.mediaItems || [];
@@ -155,6 +174,7 @@ app.get('/photos', async (req, res) => {
       type: item.mimeType?.startsWith('video') ? 'video' : 'photo'
     })));
   } catch (error) {
+    console.error("STREAM ERROR:", error.response?.data || error.message);
     res.status(400).json({ error: "PENDING_ACTION", details: error.response?.data || error.message });
   }
 });
