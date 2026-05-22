@@ -31,6 +31,7 @@ const oauth2Client = new google.auth.OAuth2(
 
 /**
  * ✅ 1. STATUS CHECK
+ * Checks if a valid refresh token exists in the database.
  */
 app.get('/auth/status', async (req, res) => {
   try {
@@ -58,7 +59,7 @@ app.get('/auth/google', (req, res) => {
 });
 
 /**
- * ✅ 3. CALLBACK
+ * ✅ 3. OAUTH CALLBACK
  */
 app.get('/auth/google/callback', async (req, res) => {
   const { code } = req.query;
@@ -77,7 +78,7 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 /**
- * ✅ 4. THE PICKER SESSION (Fixed for Albums)
+ * ✅ 4. THE PICKER SESSION (Configured Exclusively for Album Selection)
  */
 app.get('/picker-session', async (req, res) => {
   try {
@@ -94,7 +95,7 @@ app.get('/picker-session', async (req, res) => {
 
     const accessToken = refresh.data.access_token;
 
-    // ✅ THE FIX: Ensuring the body strictly follows the Picker API schema
+    // Strict 2026 Photos Picker Schema payload configuration
     const sessionRes = await axios.post('https://photospicker.googleapis.com/v1/sessions', {
       "albumSelectionConfig": {
         "maxSelections": 50
@@ -116,7 +117,6 @@ app.get('/picker-session', async (req, res) => {
 
     res.json({ pickerUri: pickerUri });
   } catch (error) {
-    // Log the actual error from Google so you can see it in Render logs
     console.error("PICKER ERROR:", error.response?.data || error.message);
     res.status(500).json({ error: "Failed to generate picker link", details: error.response?.data || error.message });
   }
